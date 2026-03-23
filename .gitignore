@@ -21,3 +21,6 @@ env/
 .env
 .DS_Store
 Thumbs.db
+
+# Claude Code internal planning files
+.claude/

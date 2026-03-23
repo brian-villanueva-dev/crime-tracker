@@ -9,9 +9,15 @@
 
 api:
   base_url: "https://data.nola.gov/resource"
-  # Dataset ID changes each year. Update this when NOPD publishes a new year.
-  # 2024: wgrp-d3ma  |  2025: 2hk3-u8jp  |  2026: es9j-6y5d
-  dataset_id: "es9j-6y5d"
+  # Each year gets its own Socrata dataset. Add the new ID here each January.
+  # All listed datasets are queried every poll cycle and results are combined,
+  # so incidents near the year boundary are never missed.
+  # Known IDs: 2024: wgrp-d3ma  |  2025: 2hk3-u8jp  |  2026: es9j-6y5d
+  datasets:
+    - id: "2hk3-u8jp"
+      year: 2025
+    - id: "es9j-6y5d"
+      year: 2026
 
 polling:
   # How often to check for new incidents, in seconds. Default: 5 minutes.
@@ -37,6 +43,15 @@ notifications:
   # Credentials for the chosen method must be filled in secrets.yaml
   # (or set as environment variables — see secrets.template.yaml).
   method: "email"
+
+# Google Sheets incident log.
+# Set enabled: true and fill in spreadsheet_id (in secrets.yaml) to have every
+# matched incident appended as a row to the configured tab.
+# Leave enabled: false to skip Sheets logging entirely.
+sheets:
+  enabled: false
+  log_tab: "Log"           # name of the tab that receives incident rows
+  dashboard_tab: "Dashboard"  # name of the tab that setup_dashboard.py builds
 
 # Path to the JSON file that stores the last-polled timestamp.
 # This file is gitignored so it never gets committed.

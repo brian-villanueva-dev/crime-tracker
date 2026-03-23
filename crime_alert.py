@@ -111,6 +111,8 @@ _ENV_VAR_MAP = {
     ("sms",     "to_numbers"):       "TWILIO_TO_NUMBERS",    # comma-separated
     ("webhook", "url"):              "WEBHOOK_URL",
     ("webhook", "headers"):          "WEBHOOK_HEADERS",      # JSON string
+    ("sheets",  "spreadsheet_id"):   "GOOGLE_SPREADSHEET_ID",
+    ("sheets",  "service_account_json"): "GOOGLE_SERVICE_ACCOUNT_JSON",
 }
 
 # Keys whose values are lists (read from env as comma-separated strings).
@@ -205,7 +207,7 @@ def load_config(config_path: str = "config.yaml", secrets_path: str = "secrets.y
 
     # Scrub any values that are still unfilled placeholders so send functions
     # get None rather than the literal string "YOUR_APP_PASSWORD".
-    for section in ("socrata", "email", "sms", "webhook"):
+    for section in ("socrata", "email", "sms", "webhook", "sheets"):
         section_dict = config.get(section, {})
         if isinstance(section_dict, dict):
             for k, v in section_dict.items():
@@ -354,9 +356,9 @@ def build_soql_timestamp(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%S.000")
 
 
-def fetch_incidents(since_dt: datetime, config: dict) -> list:
+def _fetch_from_dataset(since_dt: datetime, dataset_id: str, base_url: str, headers: dict) -> list:
     """
-    Query the Socrata API for all incidents with timecreate > since_dt.
+    Query a single Socrata dataset for all incidents with timecreate > since_dt.
 
     Paginates automatically: if a page returns exactly SOCRATA_PAGE_SIZE
     rows, it fetches the next page using the last seen timecreate as the
@@ -365,16 +367,7 @@ def fetch_incidents(since_dt: datetime, config: dict) -> list:
     Returns a list of incident dicts (may be empty).
     Raises requests.HTTPError on non-2xx responses.
     """
-    base_url = config["api"]["base_url"].rstrip("/")
-    dataset_id = config["api"]["dataset_id"]
     url = f"{base_url}/{dataset_id}.json"
-
-    headers = {}
-    app_token = config.get("socrata", {}).get("app_token", "")
-    if app_token and not app_token.startswith("YOUR_"):
-        # Only send the token if it looks like a real value.
-        headers["X-App-Token"] = app_token
-
     all_incidents = []
     current_since = since_dt
 
@@ -387,6 +380,14 @@ def fetch_incidents(since_dt: datetime, config: dict) -> list:
 
         logger.debug("Querying %s with $where: %s", url, params["$where"])
         response = requests.get(url, params=params, headers=headers, timeout=30)
+
+        # 404 means the dataset ID doesn't exist (e.g., a prior-year dataset
+        # that was removed or had its ID changed). Return empty instead of
+        # crashing — the other configured datasets will still be queried.
+        if response.status_code == 404:
+            logger.warning("Dataset %s returned 404 — skipping (check the ID in config.yaml).", url)
+            return []
+
         response.raise_for_status()
 
         page = response.json()
@@ -410,6 +411,59 @@ def fetch_incidents(since_dt: datetime, config: dict) -> list:
             break
 
     return all_incidents
+
+
+def fetch_incidents(since_dt: datetime, config: dict) -> list:
+    """
+    Query all configured Socrata datasets and return a combined, deduplicated list.
+
+    Supports two config formats:
+        New:  api.datasets  — list of {id, year} dicts (query all datasets)
+        Old:  api.dataset_id — single string (backward-compatible)
+
+    All datasets are queried with the same since_dt window so incidents
+    near year boundaries (e.g., a Dec 31 incident entered in January) are
+    never missed. Results are deduplicated by nopd_item to prevent double-
+    alerting if the same record somehow appears in two datasets.
+
+    Raises requests.HTTPError on non-2xx responses from any dataset.
+    """
+    base_url = config["api"]["base_url"].rstrip("/")
+
+    # Build the auth header once; reuse for every dataset request.
+    headers = {}
+    app_token = config.get("socrata", {}).get("app_token", "")
+    if app_token:
+        headers["X-App-Token"] = app_token
+
+    # Resolve the dataset list — support both the new list format and the old
+    # single-ID format so existing config files continue to work.
+    api_cfg = config.get("api", {})
+    if "datasets" in api_cfg:
+        dataset_ids = [ds["id"] for ds in api_cfg["datasets"]]
+    elif "dataset_id" in api_cfg:
+        # Backward-compatible: wrap the single ID in a list.
+        dataset_ids = [api_cfg["dataset_id"]]
+    else:
+        logger.error("No datasets configured under api.datasets or api.dataset_id.")
+        return []
+
+    # Query each dataset and merge results, deduplicating by nopd_item.
+    # Errors from one dataset are logged but don't abort the others.
+    seen_items: dict = {}  # nopd_item → incident dict
+    for dataset_id in dataset_ids:
+        logger.debug("Fetching from dataset %s …", dataset_id)
+        try:
+            incidents = _fetch_from_dataset(since_dt, dataset_id, base_url, headers)
+        except requests.HTTPError as e:
+            logger.error("HTTP error fetching dataset %s: %s — skipping.", dataset_id, e)
+            continue
+        for incident in incidents:
+            key = incident.get("nopd_item") or id(incident)  # fall back to object id if key missing
+            seen_items[key] = incident
+        logger.debug("Dataset %s returned %d record(s).", dataset_id, len(incidents))
+
+    return list(seen_items.values())
 
 
 # ---------------------------------------------------------------------------
@@ -566,6 +620,122 @@ def send_alert(message: str, incident: dict, config: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Google Sheets logging
+# ---------------------------------------------------------------------------
+
+# Column headers written to the Log tab on first use.
+SHEETS_LOG_HEADERS = [
+    "Date", "Time", "Day of Week", "Block Address",
+    "Crime Type", "Priority", "NOPD Item",
+]
+
+
+def init_sheets(config: dict):
+    """
+    Connect to Google Sheets and return the log worksheet, or None if disabled.
+
+    Returns None (without raising) when:
+        - sheets.enabled is False in config.yaml
+        - spreadsheet_id or service_account_json is missing / placeholder
+        - gspread / google-auth packages are not installed
+
+    On first connection, writes the header row if the tab is empty so the
+    spreadsheet is ready to receive data immediately.
+    """
+    sheets_cfg = config.get("sheets", {})
+
+    # Check the kill-switch in config.yaml first.
+    if not sheets_cfg.get("enabled", False):
+        return None
+
+    spreadsheet_id = sheets_cfg.get("spreadsheet_id")
+    sa_json_path = sheets_cfg.get("service_account_json")
+    log_tab = sheets_cfg.get("log_tab", "Log")
+
+    if not spreadsheet_id or not sa_json_path:
+        logger.warning(
+            "Sheets logging is enabled but spreadsheet_id or service_account_json "
+            "is not configured — skipping Sheets setup."
+        )
+        return None
+
+    # Lazy import so the script still works if the packages aren't installed.
+    try:
+        import gspread
+        from google.oauth2.service_account import Credentials
+    except ImportError:
+        logger.warning(
+            "gspread / google-auth not installed. "
+            "Run: pip install gspread google-auth    Sheets logging disabled."
+        )
+        return None
+
+    # The Sheets API scope is the only permission the service account needs.
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+    ]
+
+    try:
+        creds = Credentials.from_service_account_file(sa_json_path, scopes=scopes)
+        client = gspread.authorize(creds)
+        spreadsheet = client.open_by_key(spreadsheet_id)
+    except FileNotFoundError:
+        logger.warning("Service account JSON not found at %s — Sheets logging disabled.", sa_json_path)
+        return None
+    except Exception as e:
+        logger.warning("Could not connect to Google Sheets: %s — logging disabled.", e)
+        return None
+
+    # Get or create the log tab.
+    try:
+        worksheet = spreadsheet.worksheet(log_tab)
+    except gspread.WorksheetNotFound:
+        worksheet = spreadsheet.add_worksheet(title=log_tab, rows=1000, cols=len(SHEETS_LOG_HEADERS))
+        logger.info("Created new tab '%s' in spreadsheet.", log_tab)
+
+    # Write headers if the sheet is empty (no rows at all).
+    if worksheet.row_count == 0 or not worksheet.get_all_values():
+        worksheet.append_row(SHEETS_LOG_HEADERS)
+        logger.info("Wrote header row to Sheets log tab '%s'.", log_tab)
+
+    logger.info("Google Sheets logging active — appending to tab '%s'.", log_tab)
+    return worksheet
+
+
+def log_to_sheets(incident: dict, worksheet) -> None:
+    """
+    Append one incident row to the Google Sheets log tab.
+
+    Columns: Date | Time | Day of Week | Block Address | Crime Type | Priority | NOPD Item
+
+    Wrapped in try/except by the caller — a Sheets failure must never crash
+    the main monitoring loop.
+    """
+    ts_raw = incident.get("timecreate", "")
+    try:
+        # Socrata timestamps: "2026-03-20T14:30:00.000000"
+        dt = datetime.strptime(ts_raw[:19], "%Y-%m-%dT%H:%M:%S")
+        date_str = dt.strftime("%Y-%m-%d")
+        time_str = dt.strftime("%H:%M:%S")
+        dow_str = dt.strftime("%A")          # e.g. "Monday"
+    except (ValueError, TypeError):
+        date_str = ts_raw
+        time_str = ""
+        dow_str = ""
+
+    row = [
+        date_str,
+        time_str,
+        dow_str,
+        incident.get("block_address", ""),
+        incident.get("typetext", ""),
+        incident.get("priority", ""),
+        incident.get("nopd_item", ""),
+    ]
+    worksheet.append_row(row)
+
+
+# ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
 
@@ -581,9 +751,9 @@ def get_default_since(backfill_days: int = None) -> datetime:
     return datetime.now() - timedelta(hours=24)
 
 
-def process_incidents(incidents: list, config: dict, state: dict) -> tuple:
+def process_incidents(incidents: list, config: dict, state: dict, worksheet=None) -> tuple:
     """
-    Filter incidents by watch area, send alerts, and advance last_polled.
+    Filter incidents by watch area, send alerts, log to Sheets, and advance last_polled.
 
     Strategy for last_polled:
         After iterating all incidents, update last_polled to the maximum
@@ -591,6 +761,9 @@ def process_incidents(incidents: list, config: dict, state: dict) -> tuple:
         sent. This prevents an alert storm if the notification service
         is down for an extended period; it also means a failed alert
         will not be retried on the next cycle. This is intentional.
+
+    worksheet — a gspread Worksheet object returned by init_sheets(), or None
+        to skip Sheets logging.
 
     Returns:
         (matched_count, failure_count)
@@ -625,6 +798,13 @@ def process_incidents(incidents: list, config: dict, state: dict) -> tuple:
             logger.error("Notification failed for item %s: %s", incident.get("nopd_item", "?"), e)
             failure_count += 1
 
+        # Append a row to the Sheets log. A Sheets failure is non-fatal.
+        if worksheet is not None:
+            try:
+                log_to_sheets(incident, worksheet)
+            except Exception as e:
+                logger.warning("Sheets logging failed for item %s: %s", incident.get("nopd_item", "?"), e)
+
     # Advance the polling window to the last timestamp we processed.
     if max_timecreate:
         state["last_polled"] = max_timecreate
@@ -632,12 +812,14 @@ def process_incidents(incidents: list, config: dict, state: dict) -> tuple:
     return matched_count, failure_count
 
 
-def run_once(config: dict, state: dict, backfill_days: int = None) -> None:
+def run_once(config: dict, state: dict, backfill_days: int = None, worksheet=None) -> None:
     """
     Execute a single poll cycle: fetch new incidents, process, save state.
 
     If the API is unreachable, we log the error and skip saving state
     so the same window is retried on the next cycle.
+
+    worksheet — passed through to process_incidents for Sheets logging.
     """
     state_file = config.get("state_file", "state.json")
 
@@ -670,7 +852,7 @@ def run_once(config: dict, state: dict, backfill_days: int = None) -> None:
 
     logger.info("Fetched %d incident(s).", len(incidents))
 
-    matched, failures = process_incidents(incidents, config, state)
+    matched, failures = process_incidents(incidents, config, state, worksheet=worksheet)
     logger.info(
         "Cycle complete: %d matched, %d alert(s) sent, %d failure(s).",
         matched,
@@ -728,9 +910,12 @@ def main():
     state_file = config.get("state_file", "state.json")
     state = load_state(state_file)
 
+    # Initialize Google Sheets logging once at startup (returns None if disabled).
+    worksheet = init_sheets(config)
+
     if not args.loop:
         # Single-shot mode: run once and exit.
-        run_once(config, state, backfill_days=args.backfill)
+        run_once(config, state, backfill_days=args.backfill, worksheet=worksheet)
         return
 
     # --- Continuous loop mode ---
@@ -749,7 +934,7 @@ def main():
     logger.info("Starting continuous poll loop (interval: %ds). Press Ctrl+C to stop.", interval)
 
     while not shutdown_event.is_set():
-        run_once(config, state, backfill_days=args.backfill)
+        run_once(config, state, backfill_days=args.backfill, worksheet=worksheet)
         # Only apply --backfill on the very first cycle (while state is still empty).
         # After the first run_once, state['last_polled'] will be set, so get_default_since
         # won't be called again — but we clear backfill_days just to be explicit.

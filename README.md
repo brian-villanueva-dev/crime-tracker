@@ -70,10 +70,11 @@ Open `config.yaml` and review:
 
 | Setting | What it does |
 |---|---|
-| `api.dataset_id` | Socrata dataset ID — update each year (see *Updating for a new year*) |
+| `api.datasets` | List of `{id, year}` entries — all are queried every poll cycle |
 | `polling.interval_seconds` | How often to check, in seconds. Default: 300 (5 min) |
 | `watch_areas` | Streets and block numbers to watch (see below) |
 | `notifications.method` | `email`, `sms`, or `webhook` |
+| `sheets.enabled` | Set to `true` to log matches to Google Sheets (see *Google Sheets logging*) |
 
 #### Adding or changing watch areas
 
@@ -91,7 +92,7 @@ Street suffix abbreviations are handled automatically — `JAY ST` and `JAY STRE
 
 ### `secrets.yaml` — credentials (never committed)
 
-Fill in only the section for your chosen notification method. The other sections can be left as-is (they won't be used).
+Fill in only the sections you need. Unused sections can be left as-is.
 
 ---
 
@@ -178,6 +179,45 @@ webhook:
 
 ---
 
+### 5. Google Sheets logging (optional)
+
+When enabled, every matched incident is appended as a row to a Google Sheet, and `setup_dashboard.py` can build a Dashboard tab with summary charts.
+
+**Step 1 — Create a GCP project and enable the Sheets API**
+
+1. Go to [console.cloud.google.com](https://console.cloud.google.com) and create a project.
+2. In the left menu go to **APIs & Services** → **Enable APIs** → search for **Google Sheets API** → **Enable**.
+
+**Step 2 — Create a service account and download a key**
+
+1. Go to **IAM & Admin** → **Service Accounts** → **Create Service Account**.
+2. Give it a name (e.g., `crime-tracker`), click **Create and Continue**, skip the optional role fields, click **Done**.
+3. Click the service account email → **Keys** tab → **Add Key** → **Create new key** → **JSON** → **Create**.
+4. Save the downloaded JSON file somewhere safe (e.g., `~/crime-tracker-sa.json`). This is your `service_account_json` path.
+
+**Step 3 — Share the spreadsheet with the service account**
+
+1. Create a new Google Sheet (or use an existing one).
+2. Copy the spreadsheet ID from the URL: `https://docs.google.com/spreadsheets/d/`**`SPREADSHEET_ID`**`/edit`
+3. Click **Share**, paste the service account email (looks like `crime-tracker@your-project.iam.gserviceaccount.com`), set role to **Editor**, click **Send**.
+
+**Step 4 — Fill in `secrets.yaml` and enable in `config.yaml`**
+
+```yaml
+# secrets.yaml
+sheets:
+  spreadsheet_id: "your_spreadsheet_id_here"
+  service_account_json: "/path/to/crime-tracker-sa.json"
+```
+
+```yaml
+# config.yaml
+sheets:
+  enabled: true
+```
+
+---
+
 ## Usage
 
 ```bash
@@ -198,6 +238,21 @@ python crime_alert.py --backfill 7 --loop
 ```
 
 Press **Ctrl+C** to stop the loop cleanly.
+
+### Dashboard (Google Sheets only)
+
+After incidents have been logged to the Sheet, run this once to build or refresh the Dashboard tab:
+
+```bash
+python setup_dashboard.py
+```
+
+It creates a **Dashboard** tab with:
+- Incident counts for Last 30 Days / Last Quarter / Year to Date
+- Bar chart of incidents by crime type
+- Breakdown by day of week and time of day
+
+Re-run it any time to refresh the dashboard with the latest data.
 
 ---
 
@@ -303,11 +358,17 @@ kill $(cat crime-tracker.pid)
 
 ## Updating for a New Year
 
-NOPD publishes a new Calls for Service dataset each year with a new Socrata dataset ID. Update `config.yaml`:
+NOPD publishes a new Calls for Service dataset each year with a new Socrata dataset ID. Add the new year's entry to the `datasets` list in `config.yaml` (keep prior years in the list — they're still queried until they stop returning new data):
 
 ```yaml
 api:
-  dataset_id: "NEW_DATASET_ID_HERE"   # replace with the new year's ID
+  datasets:
+    - id: "2hk3-u8jp"
+      year: 2025
+    - id: "es9j-6y5d"
+      year: 2026
+    - id: "NEW_DATASET_ID"   # ← add new year here
+      year: 2027
 ```
 
 Known dataset IDs:
@@ -318,14 +379,14 @@ Known dataset IDs:
 | 2025 | `2hk3-u8jp` |
 | 2026 | `es9j-6y5d` |
 
-After updating the dataset ID, delete `state.json` if you want to backfill from the start of the new year, or use `--backfill 365` on the first run.
+After adding a new year, delete `state.json` if you want to backfill from the start of the new year, or use `--backfill 365` on the first run. Datasets that return 404 (e.g., if an old ID changes) are automatically skipped with a warning.
 
 ---
 
 ## Troubleshooting
 
 **No incidents returned after `--backfill`**
-- Check that `config.yaml` has the correct `dataset_id` for the current year.
+- Check that `config.yaml` has the correct dataset IDs under `api.datasets` for the current year.
 - Delete `state.json` and re-run with `--backfill N` — a future-dated `last_polled` will return zero results.
 
 **Gmail authentication error**
