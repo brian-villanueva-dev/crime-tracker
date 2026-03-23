@@ -663,6 +663,7 @@ def init_sheets(config: dict):
 
     # Check the kill-switch in config.yaml first.
     if not sheets_cfg.get("enabled", False):
+        print("SHEETS INIT: reached return point 1 (sheets.enabled is false or missing)")
         return None
 
     spreadsheet_id = sheets_cfg.get("spreadsheet_id")
@@ -670,6 +671,7 @@ def init_sheets(config: dict):
     log_tab = sheets_cfg.get("log_tab", "Log")
 
     if not spreadsheet_id or not sa_json_path:
+        print("SHEETS INIT: reached return point 2 (spreadsheet_id or service_account_json is missing)")
         logger.warning(
             "Sheets logging is enabled but spreadsheet_id or service_account_json "
             "is not configured — skipping Sheets setup."
@@ -681,6 +683,7 @@ def init_sheets(config: dict):
         import gspread
         from google.oauth2.service_account import Credentials
     except ImportError as e:
+        print(f"SHEETS INIT: reached return point 3 (ImportError)")
         print(f"SHEETS INIT ERROR: {e}")
         logger.warning(
             "gspread / google-auth not installed. "
@@ -698,10 +701,12 @@ def init_sheets(config: dict):
         client = gspread.authorize(creds)
         spreadsheet = client.open_by_key(spreadsheet_id)
     except FileNotFoundError as e:
+        print(f"SHEETS INIT: reached return point 4 (FileNotFoundError)")
         print(f"SHEETS INIT ERROR: {e}")
         logger.warning("Service account JSON not found at %s — Sheets logging disabled.", sa_json_path)
         return None
     except Exception as e:
+        print(f"SHEETS INIT: reached return point 5 (Exception)")
         print(f"SHEETS INIT ERROR: {e}")
         logger.warning("Could not connect to Google Sheets: %s — logging disabled.", e)
         return None
@@ -719,6 +724,7 @@ def init_sheets(config: dict):
         logger.info("Wrote header row to Sheets log tab '%s'.", log_tab)
 
     logger.info("Google Sheets logging active — appending to tab '%s'.", log_tab)
+    print("SHEETS INIT: reached return point 6 (success — returning worksheet)")
     return worksheet
 
 
