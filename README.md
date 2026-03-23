@@ -235,6 +235,13 @@ python crime_alert.py --loop
 
 # Backfill 7 days on first run, then keep polling
 python crime_alert.py --backfill 7 --loop
+
+# Fetch and process exactly one calendar month, log matches to Sheets, then exit.
+# Use this instead of --backfill on a low-RAM server — loads one month at a time
+# rather than a full year. Run once per month to populate the Sheets log:
+python crime_alert.py --backfill-month 2025-01
+python crime_alert.py --backfill-month 2025-02
+# ... and so on through the present month
 ```
 
 Press **Ctrl+C** to stop the loop cleanly.
