@@ -72,7 +72,8 @@ SUFFIX_MAP = {
 BLOCK_ADDRESS_PATTERN = re.compile(r"^(\d+)XX\s+(.+)$", re.IGNORECASE)
 
 # How many records to request per Socrata API page.
-SOCRATA_PAGE_SIZE = 1000
+# Kept at 200 to limit peak memory usage — important on low-RAM servers.
+SOCRATA_PAGE_SIZE = 200
 
 
 # ---------------------------------------------------------------------------
@@ -356,9 +357,18 @@ def build_soql_timestamp(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%S.000")
 
 
-def _fetch_from_dataset(since_dt: datetime, dataset_id: str, base_url: str, headers: dict) -> list:
+def _fetch_from_dataset(
+    since_dt: datetime,
+    dataset_id: str,
+    base_url: str,
+    headers: dict,
+    until_dt: datetime = None,
+) -> list:
     """
     Query a single Socrata dataset for all incidents with timecreate > since_dt.
+
+    If until_dt is provided, also adds timecreate < until_dt to the filter,
+    bounding the query to a closed time window (used by --backfill-month).
 
     Paginates automatically: if a page returns exactly SOCRATA_PAGE_SIZE
     rows, it fetches the next page using the last seen timecreate as the
@@ -372,8 +382,12 @@ def _fetch_from_dataset(since_dt: datetime, dataset_id: str, base_url: str, head
     current_since = since_dt
 
     while True:
+        where = f"timecreate > '{build_soql_timestamp(current_since)}'"
+        if until_dt is not None:
+            where += f" AND timecreate < '{build_soql_timestamp(until_dt)}'"
+
         params = {
-            "$where": f"timecreate > '{build_soql_timestamp(current_since)}'",
+            "$where": where,
             "$order": "timecreate ASC",
             "$limit": SOCRATA_PAGE_SIZE,
         }
@@ -413,18 +427,21 @@ def _fetch_from_dataset(since_dt: datetime, dataset_id: str, base_url: str, head
     return all_incidents
 
 
-def fetch_incidents(since_dt: datetime, config: dict) -> list:
+def fetch_incidents(since_dt: datetime, config: dict, until_dt: datetime = None) -> list:
     """
     Query all configured Socrata datasets and return a combined, deduplicated list.
+
+    since_dt — lower bound (exclusive): only incidents with timecreate > since_dt
+    until_dt — optional upper bound (exclusive): timecreate < until_dt.
+               Used by --backfill-month to bound the query to one calendar month
+               without loading the full year into memory.
 
     Supports two config formats:
         New:  api.datasets  — list of {id, year} dicts (query all datasets)
         Old:  api.dataset_id — single string (backward-compatible)
 
-    All datasets are queried with the same since_dt window so incidents
-    near year boundaries (e.g., a Dec 31 incident entered in January) are
-    never missed. Results are deduplicated by nopd_item to prevent double-
-    alerting if the same record somehow appears in two datasets.
+    All datasets are queried with the same window so incidents near year
+    boundaries are never missed. Results are deduplicated by nopd_item.
 
     Raises requests.HTTPError on non-2xx responses from any dataset.
     """
@@ -454,7 +471,7 @@ def fetch_incidents(since_dt: datetime, config: dict) -> list:
     for dataset_id in dataset_ids:
         logger.debug("Fetching from dataset %s …", dataset_id)
         try:
-            incidents = _fetch_from_dataset(since_dt, dataset_id, base_url, headers)
+            incidents = _fetch_from_dataset(since_dt, dataset_id, base_url, headers, until_dt=until_dt)
         except requests.HTTPError as e:
             logger.error("HTTP error fetching dataset %s: %s — skipping.", dataset_id, e)
             continue
@@ -812,6 +829,69 @@ def process_incidents(incidents: list, config: dict, state: dict, worksheet=None
     return matched_count, failure_count
 
 
+def run_backfill_month(config: dict, year: int, month: int, worksheet=None) -> None:
+    """
+    Fetch, process, and log one calendar month of incidents, then return.
+
+    Unlike run_once(), this does NOT read or write state.json — it is a
+    self-contained historical query that never affects the continuous-poll
+    window.  Use it to populate the Google Sheets log month-by-month without
+    loading a full year into memory at once:
+
+        python crime_alert.py --backfill-month 2025-01
+        python crime_alert.py --backfill-month 2025-02
+        ...
+
+    The lower bound is one second before midnight on the first of the month
+    (because the Socrata filter is strict ">"), so all records with
+    timecreate >= YYYY-MM-01 00:00:00 are captured.
+    The upper bound is the first moment of the following month (exclusive),
+    so records from adjacent months are never included.
+    """
+    # Lower bound: one second before the month starts so timecreate > bound
+    # captures everything from 00:00:00 on the 1st.
+    since_dt = datetime(year, month, 1) - timedelta(seconds=1)
+
+    # Upper bound: first moment of the next month (exclusive <).
+    if month == 12:
+        until_dt = datetime(year + 1, 1, 1)
+    else:
+        until_dt = datetime(year, month + 1, 1)
+
+    month_label = f"{year}-{month:02d}"
+    logger.info(
+        "Backfilling %s (fetching timecreate >= %s and < %s) …",
+        month_label,
+        datetime(year, month, 1).strftime("%Y-%m-%d %H:%M:%S"),
+        until_dt.strftime("%Y-%m-%d %H:%M:%S"),
+    )
+
+    try:
+        incidents = fetch_incidents(since_dt, config, until_dt=until_dt)
+    except requests.ConnectionError as e:
+        logger.error("Connection error during backfill of %s: %s", month_label, e)
+        return
+    except requests.Timeout:
+        logger.error("Request timed out during backfill of %s.", month_label)
+        return
+    except requests.HTTPError as e:
+        logger.error("HTTP error during backfill of %s: %s", month_label, e)
+        return
+
+    logger.info("Fetched %d incident(s) for %s.", len(incidents), month_label)
+
+    # Temporary state dict — discarded after this call so state.json is untouched.
+    temp_state: dict = {}
+    matched, failures = process_incidents(incidents, config, temp_state, worksheet=worksheet)
+    logger.info(
+        "Backfill %s complete: %d matched, %d alert(s) sent, %d failure(s).",
+        month_label,
+        matched,
+        matched - failures,
+        failures,
+    )
+
+
 def run_once(config: dict, state: dict, backfill_days: int = None, worksheet=None) -> None:
     """
     Execute a single poll cycle: fetch new incidents, process, save state.
@@ -874,10 +954,11 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  python crime_alert.py                  # run once\n"
-            "  python crime_alert.py --loop           # poll continuously\n"
-            "  python crime_alert.py --backfill 7     # pull last 7 days, then exit\n"
-            "  python crime_alert.py --backfill 7 --loop  # backfill, then keep polling\n"
+            "  python crime_alert.py                        # run once\n"
+            "  python crime_alert.py --loop                 # poll continuously\n"
+            "  python crime_alert.py --backfill 7           # pull last 7 days, then exit\n"
+            "  python crime_alert.py --backfill 7 --loop    # backfill, then keep polling\n"
+            "  python crime_alert.py --backfill-month 2025-12  # one calendar month, then exit\n"
         ),
     )
     parser.add_argument(
@@ -893,6 +974,17 @@ def main():
         help=(
             "On the first run (no state file), pull incidents from the last N days. "
             "Has no effect on subsequent runs once a state file exists."
+        ),
+    )
+    parser.add_argument(
+        "--backfill-month",
+        metavar="YYYY-MM",
+        default=None,
+        help=(
+            "Fetch and process exactly one calendar month of data, log matches to "
+            "Google Sheets, then exit. Does not read or update state.json. "
+            "Run once per month to populate the Sheets log without loading a full "
+            "year into memory: --backfill-month 2025-01, then 2025-02, etc."
         ),
     )
     args = parser.parse_args()
@@ -912,6 +1004,22 @@ def main():
 
     # Initialize Google Sheets logging once at startup (returns None if disabled).
     worksheet = init_sheets(config)
+
+    # --backfill-month: fetch one calendar month, log to Sheets, exit.
+    # Handled before --loop so it never enters the continuous poll path.
+    if args.backfill_month:
+        try:
+            year_str, month_str = args.backfill_month.split("-")
+            year, month = int(year_str), int(month_str)
+            if not (1 <= month <= 12):
+                raise ValueError
+        except ValueError:
+            logger.error(
+                "--backfill-month requires YYYY-MM format with a valid month (e.g. 2025-12)."
+            )
+            sys.exit(1)
+        run_backfill_month(config, year, month, worksheet=worksheet)
+        return
 
     if not args.loop:
         # Single-shot mode: run once and exit.
