@@ -680,7 +680,8 @@ def init_sheets(config: dict):
     try:
         import gspread
         from google.oauth2.service_account import Credentials
-    except ImportError:
+    except ImportError as e:
+        print(f"SHEETS INIT ERROR: {e}")
         logger.warning(
             "gspread / google-auth not installed. "
             "Run: pip install gspread google-auth    Sheets logging disabled."
@@ -696,10 +697,12 @@ def init_sheets(config: dict):
         creds = Credentials.from_service_account_file(sa_json_path, scopes=scopes)
         client = gspread.authorize(creds)
         spreadsheet = client.open_by_key(spreadsheet_id)
-    except FileNotFoundError:
+    except FileNotFoundError as e:
+        print(f"SHEETS INIT ERROR: {e}")
         logger.warning("Service account JSON not found at %s — Sheets logging disabled.", sa_json_path)
         return None
     except Exception as e:
+        print(f"SHEETS INIT ERROR: {e}")
         logger.warning("Could not connect to Google Sheets: %s — logging disabled.", e)
         return None
 
