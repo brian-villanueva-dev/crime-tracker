@@ -1,0 +1,43 @@
+# ---------------------------------------------------------------------------
+# NOPD Crime Alert Monitor — non-sensitive settings
+# Safe to commit to git. Keep credentials in secrets.yaml (gitignored).
+#
+# SETUP: Copy this file to config.yaml and fill in your watch areas.
+#   cp config.template.yaml config.yaml
+# config.yaml is gitignored so your neighborhood details stay private.
+# ---------------------------------------------------------------------------
+
+api:
+  base_url: "https://data.nola.gov/resource"
+  # Dataset ID changes each year. Update this when NOPD publishes a new year.
+  # 2024: wgrp-d3ma  |  2025: 2hk3-u8jp  |  2026: es9j-6y5d
+  dataset_id: "es9j-6y5d"
+
+polling:
+  # How often to check for new incidents, in seconds. Default: 5 minutes.
+  interval_seconds: 300
+
+# Streets and block numbers to watch.
+# NOPD masks addresses to the block level (e.g., "24XX LARK ST").
+# List each street once; list all blocks you care about for that street.
+# Block numbers are the hundred-floored value: 2400 matches "24XX".
+#
+# Street suffix abbreviations are handled automatically — "ST", "STREET",
+# "AVE", "AVENUE", "PKWY", "PARKWAY" etc. all match each other.
+watch_areas:
+  - street: "YOUR STREET NAME ST"
+    blocks: [1000, 1100, 1200]
+  - street: "ANOTHER STREET AVE"
+    blocks: [500, 600]
+  - street: "NEARBY PKWY"
+    blocks: [3400]
+
+notifications:
+  # Which channel to use. Options: email | sms | webhook
+  # Credentials for the chosen method must be filled in secrets.yaml
+  # (or set as environment variables — see secrets.template.yaml).
+  method: "email"
+
+# Path to the JSON file that stores the last-polled timestamp.
+# This file is gitignored so it never gets committed.
+state_file: "state.json"

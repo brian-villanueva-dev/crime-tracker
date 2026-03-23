@@ -1,0 +1,23 @@
+# Never commit credentials
+secrets.yaml
+
+# Never commit your personal watch area config — use config.template.yaml instead
+config.yaml
+
+# Never commit runtime state (contains polling timestamp)
+state.json
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Editor/OS noise
+.env
+.DS_Store
+Thumbs.db
