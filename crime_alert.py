@@ -817,6 +817,10 @@ def process_incidents(incidents: list, config: dict, state: dict, worksheet=None
             failure_count += 1
 
         # Append a row to the Sheets log. A Sheets failure is non-fatal.
+        if worksheet is None:
+            print("SHEETS DEBUG: worksheet is None")
+        else:
+            print("SHEETS DEBUG: about to log to sheets")
         if worksheet is not None:
             try:
                 log_to_sheets(incident, worksheet)
@@ -1009,7 +1013,9 @@ def main():
     state = load_state(state_file)
 
     # Initialize Google Sheets logging once at startup (returns None if disabled).
+    print("SHEETS DEBUG: config sheets section =", config.get("sheets"))
     worksheet = init_sheets(config)
+    print("SHEETS DEBUG: worksheet after init_sheets =", worksheet)
 
     # --backfill-month: fetch one calendar month, log to Sheets, exit.
     # Handled before --loop so it never enters the continuous poll path.
