@@ -749,6 +749,7 @@ def log_to_sheets(incident: dict, worksheet) -> None:
         incident.get("priority", ""),
         incident.get("nopd_item", ""),
     ]
+    logger.debug("Appending row to Sheets: %s", row)
     worksheet.append_row(row)
 
 
@@ -820,7 +821,12 @@ def process_incidents(incidents: list, config: dict, state: dict, worksheet=None
             try:
                 log_to_sheets(incident, worksheet)
             except Exception as e:
-                logger.warning("Sheets logging failed for item %s: %s", incident.get("nopd_item", "?"), e)
+                logger.error(
+                    "Sheets logging failed for item %s: %s",
+                    incident.get("nopd_item", "?"),
+                    e,
+                    exc_info=True,
+                )
 
     # Advance the polling window to the last timestamp we processed.
     if max_timecreate:
