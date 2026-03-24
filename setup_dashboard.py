@@ -87,12 +87,20 @@ def aggregate(log_rows: list) -> dict:
     """
     cutoff_30d, cutoff_quarter, cutoff_ytd = _compute_date_ranges()
 
+    # DEBUG — print cutoff dates so it's clear what time windows are active.
+    print(f"DEBUG cutoffs:  last_30d >= {cutoff_30d}  |  last_quarter >= {cutoff_quarter}  |  ytd >= {cutoff_ytd}")
+
     count_30d = count_quarter = count_ytd = 0
     by_type   = Counter()
     by_dow    = Counter()
     by_tod    = Counter()
 
-    for row in log_rows:
+    for i, row in enumerate(log_rows):
+        # DEBUG — print the first 3 raw date values and their parsed result.
+        if i < 3:
+            raw_date = row.get("Date", "")
+            parsed   = _parse_date(raw_date)
+            print(f"DEBUG row {i}: Date={raw_date!r}  ->  parsed={parsed}")
         date  = _parse_date(row.get("Date", ""))
         ctype = row.get("Crime Type", "UNKNOWN") or "UNKNOWN"
         dow   = row.get("Day of Week", "") or ""
