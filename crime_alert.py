@@ -195,7 +195,15 @@ def load_config(config_path: str = "config.yaml", secrets_path: str = "secrets.y
     if secrets_file.exists():
         with secrets_file.open() as f:
             secrets = yaml.safe_load(f) or {}
-        config.update(secrets)
+        # Deep-merge secrets into config so nested dicts (e.g. sheets, email) are
+        # combined rather than replaced. config.update() would overwrite the entire
+        # sheets dict from config.yaml with the one from secrets.yaml, losing keys
+        # like enabled/log_tab that only live in config.yaml.
+        for key, val in secrets.items():
+            if key in config and isinstance(config[key], dict) and isinstance(val, dict):
+                config[key].update(val)
+            else:
+                config[key] = val
         logger.debug("Loaded secrets from %s.", secrets_path)
     else:
         logger.info(
