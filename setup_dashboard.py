@@ -38,7 +38,7 @@ from pathlib import Path
 
 # Reuse the load_config() function from the main script to avoid duplicating
 # YAML loading and env-var overlay logic.
-from crime_alert import load_config
+from crime_alert import load_config, SHEETS_LOG_HEADERS
 
 logging.basicConfig(
     level=logging.INFO,
@@ -440,7 +440,12 @@ def main():
         )
         sys.exit(1)
 
-    log_rows = log_ws.get_all_records()   # list of dicts keyed by header row
+    # The Log tab has no header row — data starts at row 1. Use get_all_values()
+    # (which returns raw lists) and zip each row against SHEETS_LOG_HEADERS to
+    # produce the dicts that aggregate() expects. get_all_records() would
+    # treat row 1 as column names, which would misread the first incident.
+    all_values = log_ws.get_all_values()
+    log_rows = [dict(zip(SHEETS_LOG_HEADERS, row)) for row in all_values]
     logger.info("Read %d row(s) from Log tab.", len(log_rows))
 
     if not log_rows:

@@ -726,8 +726,10 @@ def init_sheets(config: dict):
         worksheet = spreadsheet.add_worksheet(title=log_tab, rows=1000, cols=len(SHEETS_LOG_HEADERS))
         logger.info("Created new tab '%s' in spreadsheet.", log_tab)
 
-    # Write headers if the sheet is empty (no rows at all).
-    if worksheet.row_count == 0 or not worksheet.get_all_values():
+    # Write headers only if the sheet contains no data at all.
+    # (worksheet.row_count is the declared row capacity, not data rows,
+    # so we check get_all_values() which returns [] on a truly empty sheet.)
+    if not worksheet.get_all_values():
         worksheet.append_row(SHEETS_LOG_HEADERS)
         logger.info("Wrote header row to Sheets log tab '%s'.", log_tab)
 
