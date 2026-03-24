@@ -163,10 +163,10 @@ def _apply_env_overrides(config: dict) -> None:
 
 
 def _is_placeholder(value) -> bool:
-    """Return True if a config value looks like an unfilled template placeholder."""
+    """Return True if a config value is an unfilled template placeholder."""
     if not isinstance(value, str):
         return False
-    return value.startswith("YOUR_") or value.startswith("https://your-")
+    return value.startswith("YOUR_")
 
 
 def load_config(config_path: str = "config.yaml", secrets_path: str = "secrets.yaml") -> dict:
