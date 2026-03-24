@@ -445,7 +445,10 @@ def main():
     # produce the dicts that aggregate() expects. get_all_records() would
     # treat row 1 as column names, which would misread the first incident.
     all_values = log_ws.get_all_values()
-    log_rows = [dict(zip(SHEETS_LOG_HEADERS, row)) for row in all_values]
+    log_rows = [
+        dict(zip(SHEETS_LOG_HEADERS, row)) for row in all_values
+        if row and row[0] != "Date"   # skip header row if present
+    ]
     logger.info("Read %d row(s) from Log tab.", len(log_rows))
 
     if not log_rows:
